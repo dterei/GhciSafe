@@ -1,0 +1,73 @@
+Name:               ghci-api
+Version:            7.6.1
+Synopsis:           API for GHCi
+Description:
+    Provides an API for building variations of GHCi, a interactive Haskell
+    interpreter.
+Category:           compilers, interpreters, ghc
+Author:             The GHC Team, David Terei <dave.terei@gmail.com>
+Maintainer:         David Terei <dave.terei@gmail.com>
+Copyright:          The GHC Team
+Homepage:           https://github.com/dterei/GhciOnline
+Bug-Reports:        https://github.com/dterei/GhciOnline/issues
+License:            BSD3
+License-File:       LICENSE
+Stability:          Stable
+
+Build-Type:         Simple
+Extra-Source-Files: README.md
+Cabal-Version:      >= 1.6
+
+Source-Repository head
+    Type: git
+    Location: git://github.com/dterei/GhciOnline.git
+
+Library
+    HS-Source-Dirs: src
+
+    Build-Depends: base       >= 3   && < 5,
+                   array      >= 0.1 && < 0.5,
+                   bytestring >= 0.9 && < 0.11,
+                   directory  >= 1   && < 1.2,
+                   process    >= 1   && < 1.2,
+                   filepath   >= 1   && < 1.4,
+                   haskeline  >= 0.6,
+                   ghc
+
+    if os(windows)
+        Build-Depends: Win32
+    else
+        Build-Depends: unix
+
+    Extensions: CPP,
+                MagicHash,
+                ForeignFunctionInterface,
+                FlexibleInstances,
+                UnboxedTuples,
+                PatternGuards
+
+    GHC-Options: -Wall
+
+    Exposed-Modules: InteractiveUI,
+                     GhciMonad,
+                     GhciTags
+
+-- Executable ghci-safe
+--     Main-Is: Main.hs
+--     Other-Modules: Build
+--                    BuildManager
+--                    BuildTools
+--                    HackageMonad
+--                    Record
+--                    RecordOptions
+--                    Report
+--                    Utils
+--     HS-Source-Dirs: ghci-safe
+--     Ghc-Options: -threaded
+--     Build-Depends: base        >= 2 && < 5,
+--                    Cabal,
+--                    containers,
+--                    directory,
+--                    filepath,
+--                    process
+
