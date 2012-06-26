@@ -16,7 +16,7 @@ Stability:          Stable
 
 Build-Type:         Simple
 Extra-Source-Files: README.md
-Cabal-Version:      >= 1.6
+Cabal-Version:      >= 1.8
 
 Source-Repository head
     Type: git
@@ -25,13 +25,14 @@ Source-Repository head
 Library
     HS-Source-Dirs: src
 
-    Build-Depends: base       >= 3   && < 5,
-                   array      >= 0.1 && < 0.5,
-                   bytestring >= 0.9 && < 0.11,
-                   directory  >= 1   && < 1.2,
-                   process    >= 1   && < 1.2,
-                   filepath   >= 1   && < 1.4,
-                   haskeline  >= 0.6,
+    Build-Depends: base         >= 3   && < 5,
+                   array        >= 0.1 && < 0.5,
+                   bytestring   >= 0.9 && < 0.11,
+                   directory    >= 1   && < 1.2,
+                   process      >= 1   && < 1.2,
+                   filepath     >= 1   && < 1.4,
+                   haskeline    >= 0.7,
+                   transformers,
                    ghc
 
     if os(windows)
@@ -52,22 +53,17 @@ Library
                      GhciMonad,
                      GhciTags
 
--- Executable ghci-safe
---     Main-Is: Main.hs
---     Other-Modules: Build
---                    BuildManager
---                    BuildTools
---                    HackageMonad
---                    Record
---                    RecordOptions
---                    Report
---                    Utils
---     HS-Source-Dirs: ghci-safe
---     Ghc-Options: -threaded
---     Build-Depends: base        >= 2 && < 5,
---                    Cabal,
---                    containers,
---                    directory,
---                    filepath,
---                    process
+Executable ghci-safe
+    HS-Source-Dirs: ghci-safe
+
+    Main-Is: Main.hs
+
+    Ghc-Options: -Wall
+
+    Extensions: PatternGuards
+
+    Build-Depends: base        >= 3 && < 5,
+                   filepath    >= 1 && < 1.4,
+                   ghc,
+                   ghci-api
 
