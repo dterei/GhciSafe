@@ -20,7 +20,7 @@ Cabal-Version:      >= 1.8
 
 Source-Repository head
     Type: git
-    Location: git://github.com/dterei/GhciOnline.git
+    Location: git://github.com/dterei/GhciSafe.git
 
 Library
     HS-Source-Dirs: src
