@@ -900,7 +900,7 @@ data MaybeCommand = GotCommand Command | BadCommand | NoLastCommand
 
 -- | Entry point for execution a ':<command>' input from user
 specialCommand :: String -> InputT GHCi Bool
-specialCommand ('!':str) = lift $ shellEscape (dropWhile isSpace str)
+-- specialCommand ('!':str) = lift $ shellEscape (dropWhile isSpace str)
 specialCommand str = do
   let (cmd,rest) = break isSpace str
   maybe_cmd <- lift $ lookupCommand cmd

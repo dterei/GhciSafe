@@ -62,11 +62,11 @@ main = ghciMain opts
          maxVerbosity        = 0,
          allowFileInput      = False,
          parseTopDir         = False,
-         defaultTopDir       = Just "/home/davidt/Software/ghc-7.6.1/lib/ghc-7.5.20120618/",
+         defaultTopDir       = Just "/home/ghc/lib/ghc-7.7.20120809/",
          allowedDynFlags     = Just [],
          allowedStaticFlags  = Just [],
          allowedGhciCommands = Just ["issafe", "type", "browse", "browse!", "kind", "kind!", "sprint", "print", "?", "help"],
-         defaultDynFlags     = ["-XSafe", "-fpackage-trust", "-distrust-all-packages", "-trust base"],
+         defaultDynFlags     = ["-XSafe", "-fpackage-trust", "-distrust-all-packages", "-trust base", "-XNoImplicitPrelude"],
          shortHelp           = Nothing,
          longHelp            = Just "GHCi Online...\n",
          startup             = loadNoIO
@@ -300,7 +300,8 @@ checkOptions dflags srcs objs = do
 loadNoIO :: GHCi ()
 loadNoIO = do
     addImportToContext "import GHC.GHCi"
-    setRunMonad "NoIO"
+    addImportToContext "import Prelude hiding (putStr, putStrLn)"
+    setRunMonad "RIO"
 
 -- :runmonad
 -- Set the monad GHCi should execute in
