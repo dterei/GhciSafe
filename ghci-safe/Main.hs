@@ -19,16 +19,15 @@ import qualified GHC
 import CmdLineParser    ( CmdLineP(), Flag() )
 import Config           ( cBooterVersion, cProjectVersion, cStage )
 import DriverPhases     ( Phase(..), isSourceFilename, startPhase )
-import DynFlags         ( defaultFatalMessager, defaultFlushOut, dopt_set,
+import DynFlags         ( defaultFatalMessager, defaultFlushOut, gopt_set,
                           flagsAll, ghcMode, ghcLink, hscOutName, hscTarget,
-                          parseDynamicFlagsFull, verbosity, wayNames )
+                          parseDynamicFlagsFull, verbosity )
 import HscTypes         ( handleFlagWarnings, handleSourceError )
 import MonadUtils       ( liftIO )
 import Packages         ( dumpPackages )
-import Panic            ( ghcError, panic )
-import StaticFlags      ( isRTSWay, staticFlags )
-import StaticFlagParser ( flagsStatic, parseStaticFlagsFull )
-import Util             ( lengthExceeds, looksLikeModuleName, notNull )
+import Panic            ( panic )
+import StaticFlags      ( staticFlags )
+import Util             ( looksLikeModuleName )
 
 import Control.Monad
 import Data.List
@@ -62,7 +61,7 @@ main = ghciMain opts
          maxVerbosity        = 0,
          allowFileInput      = False,
          parseTopDir         = False,
-         defaultTopDir       = Just "/home/ghc/lib/ghc-7.7.20120809/",
+         defaultTopDir       = Just "/usr/lib/ghc-7.7.20130304",
          allowedDynFlags     = Just [],
          allowedStaticFlags  = Just [],
          allowedGhciCommands = Just ["issafe", "type", "browse", "browse!", "kind", "kind!", "sprint", "print", "?", "help"],
@@ -97,7 +96,7 @@ startGHCi opts = do
                           ghcLink    = GHC.LinkInMemory,
                           hscOutName = panic "Main.main:hscOutName not set",
                           verbosity  = defaultVerbosity opts
-                        } `dopt_set` GHC.Opt_ImplicitImportQualified
+                        } `gopt_set` GHC.Opt_ImplicitImportQualified
        defFlags = map (GHC.mkGeneralLocated "on the commandline")
                       (defaultDynFlags opts)
        activeFlags = fromMaybe flagsAll $ allowedDynFlags opts
@@ -145,7 +144,8 @@ startGHCi opts = do
       liftIO $ hPutStrLn stderr ("Hsc static flags: " ++ unwords staticFlags)
 
    ---------------- Final sanity checking ---------------
-   liftIO $ checkOptions dflags5 srcs objs
+   -- liftIO $ checkOptions dflags5 srcs objs
+   -- liftIO $ checkOptions DoInteractive dflags5 srcs objs
 
    ---------------- Do the business ---------------
    let safeCmds = case allowedGhciCommands opts of
@@ -203,10 +203,9 @@ parseCmdLine opts = do
                   then topDir'
                   else defaultTopDir opts
        lArgs = map (GHC.mkGeneralLocated "on the commandline") args
-       activeFlags = fromMaybe flagsStatic $ allowedStaticFlags opts
 
    -- parse the static flags
-   (flags, warns) <- parseStaticFlagsFull activeFlags lArgs
+   (flags, warns) <- GHC.parseStaticFlags lArgs
 
    return (topDir, flags, warns)
 
@@ -258,41 +257,6 @@ isSourceFile m =  isSourceFilename m
                || looksLikeModuleName m
                || "-" `isPrefixOf` m
                || '.' `notElem` m
-
--- -----------------------------------------------------------------------------
--- Option sanity checks
-
--- | Ensure sanity of options. Final sanity checking before kicking off a
--- compilation (pipeline). Throws 'UsageError' or 'CmdLineError' if not.
-checkOptions :: GHC.DynFlags -> [(String,Maybe Phase)] -> [String] -> IO ()
-checkOptions dflags srcs objs = do
-   -- Complain about any unknown flags
-   let unknown_opts = [ f | (f@('-':_), _) <- srcs ]
-
-   when (notNull unknown_opts) $
-      ghcError (GHC.UsageError ("unrecognised flags: " ++ unwords unknown_opts))
-
-   when (notNull (filter isRTSWay (wayNames dflags))) $
-      hPutStrLn stderr
-         ("Warning: -debug, -threaded and -ticky are ignored by GHCi")
-
-   -- -prof and --interactive are not a good combination
-   when (notNull (filter (not . isRTSWay) (wayNames dflags))) $
-      ghcError
-         (GHC.UsageError "--interactive can't be used with -prof or -unreg.")
-
-   -- -ohi sanity check
-   when (isJust (GHC.outputHi dflags) && (srcs `lengthExceeds` 1)) $
-      ghcError (GHC.UsageError
-            "-ohi can only be used when compiling a single source file")
-
-   -- -o sanity checking
-   when (srcs `lengthExceeds` 1 && isJust (GHC.outputFile dflags)) $
-      ghcError (GHC.UsageError "can't apply -o to multiple source files")
-
-   when (notNull objs) $
-      hPutStrLn stderr ("Warning: the following files would be used as"
-         ++ " linker inputs, but linking is not being done: " ++ unwords objs)
 
 -----------------------------------------------------------------------------
 -- GHCi Monad setup
