@@ -20,12 +20,11 @@ import CmdLineParser    ( CmdLineP(), Flag() )
 import Config           ( cBooterVersion, cProjectVersion, cStage )
 import DriverPhases     ( Phase(..), isSourceFilename, startPhase )
 import DynFlags         ( defaultFatalMessager, defaultFlushOut, gopt_set,
-                          flagsAll, ghcMode, ghcLink, hscOutName, hscTarget,
+                          flagsAll, ghcMode, ghcLink, hscTarget,
                           parseDynamicFlagsFull, verbosity )
 import HscTypes         ( handleFlagWarnings, handleSourceError )
 import MonadUtils       ( liftIO )
 import Packages         ( dumpPackages )
-import Panic            ( panic )
 import StaticFlags      ( staticFlags )
 import Util             ( looksLikeModuleName )
 
@@ -61,7 +60,7 @@ main = ghciMain opts
          maxVerbosity        = 0,
          allowFileInput      = False,
          parseTopDir         = False,
-         defaultTopDir       = Just "/usr/lib/ghc-7.7.20130304",
+         defaultTopDir       = Just "/usr/lib/ghc-7.8.4/",
          allowedDynFlags     = Just [],
          allowedStaticFlags  = Just [],
          allowedGhciCommands = Just ["issafe", "type", "browse", "browse!", "kind", "kind!", "sprint", "print", "?", "help"],
@@ -77,8 +76,8 @@ main = ghciMain opts
 -- | ghciMain runs GHCi with the options specified.
 ghciMain :: GHCiOptions -> IO ()
 ghciMain opts = do
-   hSetBuffering stdout NoBuffering
-   hSetBuffering stderr NoBuffering
+   hSetBuffering stdout LineBuffering
+   hSetBuffering stderr LineBuffering
    GHC.defaultErrorHandler defaultFatalMessager defaultFlushOut (startGHCi opts)
 
 -- | startGHCi starts up GHCi.
@@ -94,7 +93,6 @@ startGHCi opts = do
    let dflags1 = dflags0{ ghcMode    = GHC.CompManager,
                           hscTarget  = GHC.HscInterpreted,
                           ghcLink    = GHC.LinkInMemory,
-                          hscOutName = panic "Main.main:hscOutName not set",
                           verbosity  = defaultVerbosity opts
                         } `gopt_set` GHC.Opt_ImplicitImportQualified
        defFlags = map (GHC.mkGeneralLocated "on the commandline")
@@ -136,16 +134,12 @@ startGHCi opts = do
                         then file_args1 ++ file_args2
                         else []
        file_paths   = map (normalise . GHC.unLoc) file_args
-       (srcs, objs) = partitionFiles file_paths [] []
+       (srcs, _)    = partitionFiles file_paths [] []
 
    ---------------- Display configuration ---------------
    when (verbosity dflags5 >= 4) $ liftIO $ dumpPackages dflags5
    when (verbosity dflags5 >= 3) $
       liftIO $ hPutStrLn stderr ("Hsc static flags: " ++ unwords staticFlags)
-
-   ---------------- Final sanity checking ---------------
-   -- liftIO $ checkOptions dflags5 srcs objs
-   -- liftIO $ checkOptions DoInteractive dflags5 srcs objs
 
    ---------------- Do the business ---------------
    let safeCmds = case allowedGhciCommands opts of
@@ -162,7 +156,7 @@ startGHCi opts = do
    handleSourceError (\e -> do
       GHC.printException e
       liftIO $ exitWith (ExitFailure 1)) $
-         interactiveUI (startup opts) ghciConfig srcs Nothing
+         interactiveUI ghciConfig srcs Nothing
 
 -- | GHCi startup message.
 startupMessage :: GHC.DynFlags -> IO ()

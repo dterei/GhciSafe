@@ -34,7 +34,7 @@ import GHC ( LoadHowMuch(..), Target(..),  TargetId(..), InteractiveImport(..),
              TyThing(..), Phase, BreakIndex, Resume, SingleStep, Ghc,
              handleSourceError )
 import HsImpExp
-import HscTypes ( tyThingParent_maybe, handleFlagWarnings, getSafeMode, dep_pkgs, hsc_IC, 
+import HscTypes ( tyThingParent_maybe, handleFlagWarnings, getSafeMode, hsc_IC, 
                   setInteractivePrintName )
 import Module
 import Name
@@ -91,6 +91,7 @@ import System.IO.Error
 import System.IO.Unsafe ( unsafePerformIO )
 import System.Process
 import Text.Printf
+import Text.Read ( readMaybe )
 
 #ifndef mingw32_HOST_OS
 import System.Posix hiding ( getEnv )
@@ -110,7 +111,8 @@ data GhciSettings = GhciSettings {
         availableCommands :: [Command],
         shortHelpText     :: String,
         fullHelpText      :: String,
-        defPrompt         :: String
+        defPrompt         :: String,
+        defPrompt2        :: String
     }
 
 defaultGhciSettings :: GhciSettings
@@ -119,7 +121,8 @@ defaultGhciSettings =
         availableCommands = ghciCommands,
         shortHelpText     = defShortHelpText,
         fullHelpText      = defFullHelpText,
-        defPrompt         = default_prompt
+        defPrompt         = default_prompt,
+        defPrompt2        = default_prompt2
     }
 
 ghciWelcomeMsg :: String
@@ -144,6 +147,7 @@ ghciCommands = [
   ("cd",        keepGoing' changeDirectory,     completeFilename),
   ("check",     keepGoing' checkModule,         completeHomeModule),
   ("continue",  keepGoing continueCmd,          noCompletion),
+  ("complete",  keepGoing completeCmd,          noCompletion),
   ("cmd",       keepGoing cmdCmd,               completeExpression),
   ("ctags",     keepGoing createCTagsWithLineNumbersCmd, completeFilename),
   ("ctags!",    keepGoing createCTagsWithRegExesCmd, completeFilename),
@@ -231,16 +235,20 @@ defFullHelpText =
   "                               (!: more details; *: all top-level names)\n" ++
   "   :cd <dir>                   change directory to <dir>\n" ++
   "   :cmd <expr>                 run the commands returned by <expr>::IO String\n" ++
+  "   :complete <dom> [<rng>] <s> list completions for partial input string\n" ++
   "   :ctags[!] [<file>]          create tags file for Vi (default: \"tags\")\n" ++
   "                               (!: use regex instead of line number)\n" ++
-  "   :def <cmd> <expr>           define a command :<cmd>\n" ++
+  "   :def <cmd> <expr>           define command :<cmd> (later defined command has\n" ++
+  "                               precedence, ::<cmd> is always a builtin command)\n" ++
   "   :edit <file>                edit file\n" ++
   "   :edit                       edit last module\n" ++
   "   :etags [<file>]             create tags file for Emacs (default: \"TAGS\")\n" ++
   "   :help, :?                   display this list of commands\n" ++
-  "   :info [<name> ...]          display information about the given names\n" ++
+  "   :info[!] [<name> ...]       display information about the given names\n" ++
+  "                               (!: do not filter instances)\n" ++
   "   :issafe [<mod>]             display safe haskell information of module <mod>\n" ++
-  "   :kind <type>                show the kind of <type>\n" ++
+  "   :kind[!] <type>             show the kind of <type>\n" ++
+  "                               (!: also print the normalised type)\n" ++
   "   :load [*]<module> ...       load module(s) and their dependents\n" ++
   "   :main [<arguments> ...]     run the main function with the given arguments\n" ++
   "   :module [+/-] [*]<mod> ...  set the context for expression evaluation\n" ++
@@ -265,7 +273,7 @@ defFullHelpText =
   "   :forward                    go forward in the history (after :back)\n" ++
   "   :history [<n>]              after :trace, show the execution history\n" ++
   "   :list                       show the source code around current breakpoint\n" ++
-  "   :list identifier            show the source code for <identifier>\n" ++
+  "   :list <identifier>          show the source code for <identifier>\n" ++
   "   :list [<module>] <line>     show the source code around line number <line>\n" ++
   "   :print [<name> ...]         prints a value without forcing its computation\n" ++
   "   :sprint [<name> ...]        simplifed version of :print\n" ++
@@ -284,6 +292,7 @@ defFullHelpText =
   "   :set args <arg> ...         set the arguments returned by System.getArgs\n" ++
   "   :set prog <progname>        set the value returned by System.getProgName\n" ++
   "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
+  "   :set prompt2 <prompt>       set the continuation prompt used in GHCi\n" ++
   "   :set editor <cmd>           set the command used for :edit\n" ++
   "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
   "   :unset <option> ...         unset options\n" ++
@@ -295,7 +304,7 @@ defFullHelpText =
   "    +s            print timing/memory stats after each evaluation\n" ++
   "    +t            print type after evaluation\n" ++
   "    -<flags>      most GHC command line flags can also be set here\n" ++
-  "                         (eg. -v2, -fglasgow-exts, etc.)\n" ++
+  "                         (eg. -v2, -XFlexibleInstances, etc.)\n" ++
   "                    for GHCi-specific flags, see User's Guide,\n"++
   "                    Flag reference, Interactive-mode options\n" ++
   "\n" ++
@@ -305,8 +314,10 @@ defFullHelpText =
   "   :show breaks                show the active breakpoints\n" ++
   "   :show context               show the breakpoint context\n" ++
   "   :show imports               show the current imports\n" ++
+  "   :show linker                show current linker state\n" ++
   "   :show modules               show the currently loaded modules\n" ++
   "   :show packages              show the currently active package flags\n" ++
+  "   :show paths                 show the currently active search paths\n" ++
   "   :show language              show the currently active language flags\n" ++
   "   :show <setting>             show value of <setting>, which is one of\n" ++
   "                                  [args, prog, prompt, editor, stop]\n" ++
@@ -326,17 +337,18 @@ findEditor = do
 
 foreign import ccall unsafe "rts_isProfiled" isProfiled :: IO CInt
 
-default_progname, default_prompt, default_stop :: String
+default_progname, default_prompt, default_prompt2, default_stop :: String
 default_progname = "<interactive>"
 default_prompt = "%s> "
+default_prompt2 = "%s| "
 default_stop = ""
 
 default_args :: [String]
 default_args = []
 
-interactiveUI :: GHCi () -> GhciSettings -> [(FilePath, Maybe Phase)] -> Maybe [String]
+interactiveUI :: GhciSettings -> [(FilePath, Maybe Phase)] -> Maybe [String]
               -> Ghc ()
-interactiveUI startup config srcs maybe_exprs = do
+interactiveUI config srcs maybe_exprs = do
    -- although GHCi compiles with -prof, it is not usable: the byte-code
    -- compiler and interpreter don't work with profiling.  So we check for
    -- this up front and emit a helpful error message (#2197)
@@ -360,9 +372,13 @@ interactiveUI startup config srcs maybe_exprs = do
    initInterpBuffering
 
    -- The initial set of DynFlags used for interactive evaluation is the same
-   -- as the global DynFlags, plus -XExtendedDefaultRules
+   -- as the global DynFlags, plus -XExtendedDefaultRules and
+   -- -XNoMonomorphismRestriction.
    dflags <- getDynFlags
-   GHC.setInteractiveDynFlags (xopt_set dflags Opt_ExtendedDefaultRules)
+   let dflags' = (`xopt_set` Opt_ExtendedDefaultRules)
+               . (`xopt_unset` Opt_MonomorphismRestriction)
+               $ dflags
+   GHC.setInteractiveDynFlags dflags'
 
    liftIO $ when (isNothing maybe_exprs) $ do
         -- Only for GHCi (not runghc and ghc -e):
@@ -375,6 +391,7 @@ interactiveUI startup config srcs maybe_exprs = do
         -- We don't want the cmd line to buffer any input that might be
         -- intended for the program, so unbuffer stdin.
         hSetBuffering stdin NoBuffering
+        hSetBuffering stderr NoBuffering
 #if defined(mingw32_HOST_OS)
         -- On Unix, stdin will use the locale encoding.  The IO library
         -- doesn't do this on Windows (yet), so for now we use UTF-8,
@@ -384,11 +401,11 @@ interactiveUI startup config srcs maybe_exprs = do
 
    default_editor <- liftIO $ findEditor
 
-   startGHCi (runGHCi startup srcs maybe_exprs)
+   startGHCi (runGHCi srcs maybe_exprs)
         GHCiState{ progname       = default_progname,
                    GhciMonad.args = default_args,
                    prompt         = defPrompt config,
-                   def_prompt     = defPrompt config,
+                   prompt2        = defPrompt2 config,
                    stop           = default_stop,
                    editor         = default_editor,
                    options        = [],
@@ -417,8 +434,8 @@ withGhcAppData right left = do
                right dir
         _ -> left
 
-runGHCi :: GHCi () -> [(FilePath, Maybe Phase)] -> Maybe [String] -> GHCi ()
-runGHCi startup paths maybe_exprs = do
+runGHCi :: [(FilePath, Maybe Phase)] -> Maybe [String] -> GHCi ()
+runGHCi paths maybe_exprs = do
   dflags <- getDynFlags
   let
    read_dot_files = not (gopt Opt_IgnoreDotGhci dflags)
@@ -490,11 +507,9 @@ runGHCi startup paths maybe_exprs = do
   -- reset line number
   getGHCiState >>= \st -> setGHCiState st{line_number=1}
 
-  -- run the startup code passed in
-  _ <- startup
-
   case maybe_exprs of
-        Nothing -> do
+        Nothing ->
+          do
             -- enter the interactive loop
             runGHCiInput $ runCommands $ nextInputLine show_prompt is_tty
         Just exprs -> do
@@ -510,7 +525,8 @@ runGHCi startup paths maybe_exprs = do
                                    $ topHandler e
                                    -- this used to be topHandlerFastExit, see #2228
             runInputTWithPrefs defaultPrefs defaultSettings $ do
-                runCommands' hdle (return Nothing)
+                -- make `ghc -e` exit nonzero on invalid input, see Trac #7962
+                runCommands' hdle (Just $ hdle (toException $ ExitFailure 1) >> return ()) (return Nothing)
 
   -- and finally, exit
   liftIO $ when (verbosity dflags > 0) $ putStrLn "Leaving GHCi."
@@ -580,6 +596,11 @@ fileLoop hdl = do
    l <- liftIO $ tryIO $ hGetLine hdl
    case l of
         Left e | isEOFError e              -> return Nothing
+               | -- as we share stdin with the program, the program
+                 -- might have already closed it, so we might get a
+                 -- handle-closed exception. We therefore catch that
+                 -- too.
+                 isIllegalOperation e      -> return Nothing
                | InvalidArgument <- etype  -> return Nothing
                | otherwise                 -> liftIO $ ioError e
                 where etype = ioeGetErrorType e
@@ -593,6 +614,7 @@ fileLoop hdl = do
 
 mkPrompt :: GHCi String
 mkPrompt = do
+  st <- getGHCiState
   imports <- GHC.getContext
   resumes <- GHC.getResumeContext
 
@@ -623,12 +645,12 @@ mkPrompt = do
 
         deflt_prompt = dots <> context_bit <> modules_bit
 
+        f ('%':'l':xs) = ppr (1 + line_number st) <> f xs
         f ('%':'s':xs) = deflt_prompt <> f xs
         f ('%':'%':xs) = char '%' <> f xs
         f (x:xs) = char x <> f xs
         f [] = empty
 
-  st <- getGHCiState
   dflags <- getDynFlags
   return (showSDoc dflags (f (prompt st)))
 
@@ -655,11 +677,12 @@ installInteractivePrint (Just ipFun) exprmode = do
 
 -- | The main read-eval-print loop
 runCommands :: InputT GHCi (Maybe String) -> InputT GHCi ()
-runCommands = runCommands' handler
+runCommands = runCommands' handler Nothing
 
 runCommands' :: (SomeException -> GHCi Bool) -- ^ Exception handler
+             -> Maybe (GHCi ()) -- ^ Source error handler
              -> InputT GHCi (Maybe String) -> InputT GHCi ()
-runCommands' eh gCmd = do
+runCommands' eh sourceErrorHandler gCmd = do
     b <- ghandle (\e -> case fromException e of
                           Just UserInterrupt -> return $ Just False
                           _ -> case fromException e of
@@ -671,7 +694,9 @@ runCommands' eh gCmd = do
             (runOneCommand eh gCmd)
     case b of
       Nothing -> return ()
-      Just _  -> runCommands' eh gCmd
+      Just success -> do
+        when (not success) $ maybe (return ()) lift sourceErrorHandler
+        runCommands' eh sourceErrorHandler gCmd
 
 -- | Evaluate a single line of user input (either :<command> or Haskell code)
 runOneCommand :: (SomeException -> GHCi Bool) -> InputT GHCi (Maybe String)
@@ -697,13 +722,12 @@ runOneCommand eh gCmd = do
                             (\c -> case removeSpaces c of
                                      ""   -> noSpace q
                                      ":{" -> multiLineCmd q
-                                     c'   -> return (Just c') )
+                                     _    -> return (Just c) )
     multiLineCmd q = do
       st <- lift getGHCiState
       let p = prompt st
-      lift $ setGHCiState st{ prompt = "%s| " }
-      mb_cmd <- collectCommand q ""
-      lift $ getGHCiState >>= \st' -> setGHCiState st'{ prompt = p }
+      lift $ setGHCiState st{ prompt = prompt2 st }
+      mb_cmd <- collectCommand q "" `GHC.gfinally` lift (getGHCiState >>= \st' -> setGHCiState st' { prompt = p })
       return mb_cmd
     -- we can't use removeSpaces for the sublines here, so
     -- multiline commands are somewhat more brittle against
@@ -716,7 +740,7 @@ runOneCommand eh gCmd = do
     collectCommand q c = q >>=
       maybe (liftIO (ioError collectError))
             (\l->if removeSpaces l == ":}"
-                 then return (Just $ removeSpaces c)
+                 then return (Just c)
                  else collectCommand q (c ++ "\n" ++ map normSpace l))
       where normSpace '\r' = ' '
             normSpace   x  = x
@@ -727,7 +751,7 @@ runOneCommand eh gCmd = do
     doCommand :: String -> InputT GHCi (Maybe Bool)
 
     -- command
-    doCommand (':' : cmd) = do
+    doCommand stmt | (':' : cmd) <- removeSpaces stmt = do
       result <- specialCommand cmd
       case result of
         True -> return Nothing
@@ -735,18 +759,45 @@ runOneCommand eh gCmd = do
 
     -- haskell
     doCommand stmt = do
+      -- if 'stmt' was entered via ':{' it will contain '\n's
+      let stmt_nl_cnt = length [ () | '\n' <- stmt ]
       ml <- lift $ isOptionSet Multiline
-      if ml
+      if ml && stmt_nl_cnt == 0 -- don't trigger automatic multi-line mode for ':{'-multiline input
         then do
+          fst_line_num <- lift (line_number <$> getGHCiState)
           mb_stmt <- checkInputForLayout stmt gCmd
           case mb_stmt of
             Nothing      -> return $ Just True
             Just ml_stmt -> do
-              result <- timeIt $ lift $ runStmt ml_stmt GHC.RunToCompletion
+              -- temporarily compensate line-number for multi-line input
+              result <- timeIt $ lift $ runStmtWithLineNum fst_line_num ml_stmt GHC.RunToCompletion
               return $ Just result
-        else do
-          result <- timeIt $ lift $ runStmt stmt GHC.RunToCompletion
+        else do -- single line input and :{-multiline input
+          last_line_num <- lift (line_number <$> getGHCiState)
+          -- reconstruct first line num from last line num and stmt
+          let fst_line_num | stmt_nl_cnt > 0 = last_line_num - (stmt_nl_cnt2 + 1)
+                           | otherwise = last_line_num -- single line input
+              stmt_nl_cnt2 = length [ () | '\n' <- stmt' ]
+              stmt' = dropLeadingWhiteLines stmt -- runStmt doesn't like leading empty lines
+          -- temporarily compensate line-number for multi-line input
+          result <- timeIt $ lift $ runStmtWithLineNum fst_line_num stmt' GHC.RunToCompletion
           return $ Just result
+
+    -- runStmt wrapper for temporarily overridden line-number
+    runStmtWithLineNum :: Int -> String -> SingleStep -> GHCi Bool
+    runStmtWithLineNum lnum stmt step = do
+        st0 <- getGHCiState
+        setGHCiState st0 { line_number = lnum }
+        result <- runStmt stmt step
+        -- restore original line_number
+        getGHCiState >>= \st -> setGHCiState st { line_number = line_number st0 }
+        return result
+
+    -- note: this is subtly different from 'unlines . dropWhile (all isSpace) . lines'
+    dropLeadingWhiteLines s | (l0,'\n':r) <- break (=='\n') s
+                            , all isSpace l0 = dropLeadingWhiteLines r
+                            | otherwise = s
+
 
 -- #4316
 -- lex the input.  If there is an unclosed layout context, request input
@@ -764,7 +815,7 @@ checkInputForLayout stmt getStmt = do
      _other              -> do
        st1 <- lift getGHCiState
        let p = prompt st1
-       lift $ setGHCiState st1{ prompt = "%s| " }
+       lift $ setGHCiState st1{ prompt = prompt2 st1 }
        mb_stmt <- ghciHandle (\ex -> case fromException ex of
                             Just UserInterrupt -> return Nothing
                             _ -> case fromException ex of
@@ -797,7 +848,7 @@ enqueueCommands cmds = do
 -- rather than a stmt.
 declPrefixes :: [String]
 declPrefixes = ["class ","data ","newtype ","type ","instance ", "deriving ",
-                "foreign "]
+                "foreign ", "default ", "default("]
 
 -- | Entry point to execute some haskell code from user
 runStmt :: String -> SingleStep -> GHCi Bool
@@ -830,7 +881,7 @@ runStmt stmt step
 
 -- | Clean up the GHCi environment after a statement has run
 afterRunStmt :: (SrcSpan -> Bool) -> GHC.RunResult -> GHCi Bool
-afterRunStmt _ (GHC.RunException e) = throw e
+afterRunStmt _ (GHC.RunException e) = liftIO $ Exception.throwIO e
 afterRunStmt step_here run_result = do
   resumes <- GHC.getResumeContext
   case run_result of
@@ -901,7 +952,7 @@ data MaybeCommand = GotCommand Command | BadCommand | NoLastCommand
 
 -- | Entry point for execution a ':<command>' input from user
 specialCommand :: String -> InputT GHCi Bool
--- specialCommand ('!':str) = lift $ shellEscape (dropWhile isSpace str)
+specialCommand ('!':str) = lift $ shellEscape (dropWhile isSpace str)
 specialCommand str = do
   let (cmd,rest) = break isSpace str
   maybe_cmd <- lift $ lookupCommand cmd
@@ -917,8 +968,8 @@ specialCommand str = do
                            ++ htxt)
          return False
 
--- shellEscape :: String -> GHCi Bool
--- shellEscape str = liftIO (system str >> return False)
+shellEscape :: String -> GHCi Bool
+shellEscape str = liftIO (system str >> return False)
 
 lookupCommand :: String -> GHCi (MaybeCommand)
 lookupCommand "" = do
@@ -939,18 +990,23 @@ lookupCommand' ":" = return Nothing
 lookupCommand' str' = do
   macros    <- liftIO $ readIORef macros_ref
   ghci_cmds <- ghci_commands `fmap` getGHCiState
-  let{ (str, cmds) = case str' of
-      ':' : rest -> (rest, ghci_cmds)
-      _ -> (str', ghci_cmds ++ macros) }
-  -- look for exact match first, then the first prefix match
-  -- We consider builtin commands first: since new macros are appended
-  -- on the *end* of the macros list, this is consistent with the view
-  -- that things defined earlier should take precedence. See also #3858
-  return $ case [ c | c <- cmds, str == cmdName c ] of
-           c:_ -> Just c
-           [] -> case [ c | c@(s,_,_) <- cmds, str `isPrefixOf` s ] of
-                 [] -> Nothing
-                 c:_ -> Just c
+  let (str, xcmds) = case str' of
+          ':' : rest -> (rest, [])     -- "::" selects a builtin command
+          _          -> (str', macros) -- otherwise include macros in lookup
+
+      lookupExact  s = find $ (s ==)           . cmdName
+      lookupPrefix s = find $ (s `isPrefixOf`) . cmdName
+
+      builtinPfxMatch = lookupPrefix str ghci_cmds
+
+  -- first, look for exact match (while preferring macros); then, look
+  -- for first prefix match (preferring builtins), *unless* a macro
+  -- overrides the builtin; see #8305 for motivation
+  return $ lookupExact str xcmds <|>
+           lookupExact str ghci_cmds <|>
+           (builtinPfxMatch >>= \c -> lookupExact (cmdName c) xcmds) <|>
+           builtinPfxMatch <|>
+           lookupPrefix str xcmds
 
 getCurrentBreakSpan :: GHCi (Maybe SrcSpan)
 getCurrentBreakSpan = do
@@ -1018,12 +1074,10 @@ info allInfo s  = handleSourceError GHC.printException $ do
 
 infoThing :: GHC.GhcMonad m => Bool -> String -> m SDoc
 infoThing allInfo str = do
-    dflags    <- getDynFlags
-    let pefas = gopt Opt_PrintExplicitForalls dflags
     names     <- GHC.parseName str
     mb_stuffs <- mapM (GHC.getInfo allInfo) names
-    let filtered = filterOutChildren (\(t,_f,_i) -> t) (catMaybes mb_stuffs)
-    return $ vcat (intersperse (text "") $ map (pprInfo pefas) filtered)
+    let filtered = filterOutChildren (\(t,_f,_ci,_fi) -> t) (catMaybes mb_stuffs)
+    return $ vcat (intersperse (text "") $ map pprInfo filtered)
 
   -- Filter out names whose parent is also there Good
   -- example is '[]', which is both a type and data
@@ -1037,11 +1091,12 @@ filterOutChildren get_thing xs
                      Just p  -> getName p `elemNameSet` all_names
                      Nothing -> False
 
-pprInfo :: PrintExplicitForalls -> (TyThing, Fixity, [GHC.ClsInst]) -> SDoc
-pprInfo pefas (thing, fixity, insts)
-  =  pprTyThingInContextLoc pefas thing
+pprInfo :: (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst]) -> SDoc
+pprInfo (thing, fixity, cls_insts, fam_insts)
+  =  pprTyThingInContextLoc thing
   $$ show_fixity
-  $$ vcat (map GHC.pprInstance insts)
+  $$ vcat (map GHC.pprInstance cls_insts)
+  $$ vcat (map GHC.pprFamInst  fam_insts)
   where
     show_fixity
         | fixity == GHC.defaultFixity = empty
@@ -1103,7 +1158,7 @@ trySuccess act =
 
 editFile :: String -> InputT GHCi ()
 editFile str =
-  do file <- if null str then lift chooseEditFile else return str
+  do file <- if null str then lift chooseEditFile else expandPath str
      st <- lift getGHCiState
      let cmd = editor st
      when (null cmd)
@@ -1176,8 +1231,8 @@ defineMacro overwrite s = do
   handleSourceError (\e -> GHC.printException e) $
    do
     hv <- GHC.compileExpr new_expr
-    liftIO (writeIORef macros_ref --
-            (filtered ++ [(macro_name, lift . runMacro hv, noCompletion)]))
+    liftIO (writeIORef macros_ref -- later defined macros have precedence
+            ((macro_name, lift . runMacro hv, noCompletion) : filtered))
 
 runMacro :: GHC.HValue{-String -> IO String-} -> String -> GHCi Bool
 runMacro fun s = do
@@ -1298,9 +1353,18 @@ doLoad retain_context howmuch = do
   -- turn off breakpoints before we load: we can't turn them off later, because
   -- the ModBreaks will have gone away.
   lift discardActiveBreakPoints
-  ok <- trySuccess $ GHC.load howmuch
-  afterLoad ok retain_context
-  return ok
+
+  -- Enable buffering stdout and stderr as we're compiling. Keeping these
+  -- handles unbuffered will just slow the compilation down, especially when
+  -- compiling in parallel.
+  gbracket (liftIO $ do hSetBuffering stdout LineBuffering
+                        hSetBuffering stderr LineBuffering)
+           (\_ ->
+            liftIO $ do hSetBuffering stdout NoBuffering
+                        hSetBuffering stderr NoBuffering) $ \_ -> do
+      ok <- trySuccess $ GHC.load howmuch
+      afterLoad ok retain_context
+      return ok
 
 
 afterLoad :: SuccessFlag
@@ -1311,8 +1375,7 @@ afterLoad ok retain_context = do
   lift discardTickArrays
   loaded_mod_summaries <- getLoadedModules
   let loaded_mods = map GHC.ms_mod loaded_mod_summaries
-      loaded_mod_names = map GHC.moduleName loaded_mods
-  modulesLoadedMsg ok loaded_mod_names
+  modulesLoadedMsg ok loaded_mods
   lift $ setContextAfterLoad retain_context loaded_mod_summaries
 
 
@@ -1385,20 +1448,22 @@ keepPackageImports = filterM is_pkg_import
           mod_name = unLoc (ideclName d)
 
 
-modulesLoadedMsg :: SuccessFlag -> [ModuleName] -> InputT GHCi ()
+modulesLoadedMsg :: SuccessFlag -> [Module] -> InputT GHCi ()
 modulesLoadedMsg ok mods = do
   dflags <- getDynFlags
-  when (verbosity dflags > 0) $ do
-   let mod_commas
+  unqual <- GHC.getPrintUnqual
+  let mod_commas
         | null mods = text "none."
         | otherwise = hsep (
             punctuate comma (map ppr mods)) <> text "."
-   case ok of
-    Failed ->
-       liftIO $ putStrLn $ showSDoc dflags (text "Failed, modules loaded: " <> mod_commas)
-    Succeeded  ->
-       liftIO $ putStrLn $ showSDoc dflags (text "Ok, modules loaded: " <> mod_commas)
+      status = case ok of
+                   Failed    -> text "Failed"
+                   Succeeded -> text "Ok"
 
+      msg = status <> text ", modules loaded:" <+> mod_commas
+
+  when (verbosity dflags > 0) $
+     liftIO $ putStrLn $ showSDocForUser dflags unqual msg
 
 -----------------------------------------------------------------------------
 -- :type
@@ -1408,9 +1473,7 @@ typeOfExpr str
   = handleSourceError GHC.printException
   $ do
        ty <- GHC.exprType str
-       dflags <- getDynFlags
-       let pefas = gopt Opt_PrintExplicitForalls dflags
-       printForUser $ sep [text str, nest 2 (dcolon <+> pprTypeForUser pefas ty)]
+       printForUser $ sep [text str, nest 2 (dcolon <+> pprTypeForUser ty)]
 
 -----------------------------------------------------------------------------
 -- :kind
@@ -1420,7 +1483,7 @@ kindOfType norm str
   = handleSourceError GHC.printException
   $ do
        (ty, kind) <- GHC.typeKind norm str
-       printForUser $ vcat [ text str <+> dcolon <+> ppr kind
+       printForUser $ vcat [ text str <+> dcolon <+> pprTypeForUser kind
                            , ppWhen norm $ equals <+> ppr ty ]
 
 
@@ -1445,7 +1508,8 @@ scriptCmd ws = do
 runScript :: String    -- ^ filename
            -> InputT GHCi ()
 runScript filename = do
-  either_script <- liftIO $ tryIO (openFile filename ReadMode)
+  filename' <- expandPath filename
+  either_script <- liftIO $ tryIO (openFile filename' ReadMode)
   case either_script of
     Left _err    -> throwGhcException (CmdLineError $ "IO error:  \""++filename++"\" "
                       ++(ioeGetErrorString _err))
@@ -1453,7 +1517,7 @@ runScript filename = do
       st <- lift $ getGHCiState
       let prog = progname st
           line = line_number st
-      lift $ setGHCiState st{progname=filename,line_number=0}
+      lift $ setGHCiState st{progname=filename',line_number=0}
       scriptLoop script
       liftIO $ hClose script
       new_st <- lift $ getGHCiState
@@ -1493,48 +1557,34 @@ isSafeModule m = do
          (throwGhcException $ CmdLineError $ "can't load interface file for module: " ++
                                     (GHC.moduleNameString $ GHC.moduleName m))
 
-    let iface' = fromJust iface
+    (msafe, pkgs) <- GHC.moduleTrustReqs m
+    let trust  = showPpr dflags $ getSafeMode $ GHC.mi_trust $ fromJust iface
+        pkg    = if packageTrusted dflags m then "trusted" else "untrusted"
+        (good, bad) = tallyPkgs dflags pkgs
 
-        trust = showPpr dflags $ getSafeMode $ GHC.mi_trust iface'
-        pkgT  = packageTrusted dflags m
-        pkg   = if pkgT then "trusted" else "untrusted"
-        (good', bad') = tallyPkgs dflags $
-                            map fst $ filter snd $ dep_pkgs $ GHC.mi_deps iface'
-        (good, bad) = case GHC.mi_trust_pkg iface' of
-                          True | pkgT -> (modulePackageId m:good', bad')
-                          True        -> (good', modulePackageId m:bad')
-                          False       -> (good', bad')
-
+    -- print info to user...
     liftIO $ putStrLn $ "Trust type is (Module: " ++ trust ++ ", Package: " ++ pkg ++ ")"
-    liftIO $ putStrLn $ "Package Trust: "
-                            ++ (if packageTrustOn dflags then "On" else "Off")
-
-    when (packageTrustOn dflags && not (null good))
+    liftIO $ putStrLn $ "Package Trust: " ++ (if packageTrustOn dflags then "On" else "Off")
+    when (not $ null good)
          (liftIO $ putStrLn $ "Trusted package dependencies (trusted): " ++
                         (intercalate ", " $ map packageIdString good))
-
-    case goodTrust (getSafeMode $ GHC.mi_trust iface') of
-        True | (null bad || not (packageTrustOn dflags)) ->
-            liftIO $ putStrLn $ mname ++ " is trusted!"
-
-        True -> do
-            liftIO $ putStrLn $ "Trusted package dependencies (untrusted): "
-                        ++ (intercalate ", " $ map packageIdString bad)
+    case msafe && null bad of
+        True -> liftIO $ putStrLn $ mname ++ " is trusted!"
+        False -> do
+            when (not $ null bad)
+                 (liftIO $ putStrLn $ "Trusted package dependencies (untrusted): "
+                            ++ (intercalate ", " $ map packageIdString bad))
             liftIO $ putStrLn $ mname ++ " is NOT trusted!"
 
-        False -> liftIO $ putStrLn $ mname ++ " is NOT trusted!"
-
   where
-    goodTrust t = t `elem` [Sf_Safe, Sf_SafeInferred, Sf_Trustworthy]
-
     mname = GHC.moduleNameString $ GHC.moduleName m
 
     packageTrusted dflags md
         | thisPackage dflags == modulePackageId md = True
-        | otherwise = trusted $ getPackageDetails (pkgState dflags)
-                                                  (modulePackageId md)
+        | otherwise = trusted $ getPackageDetails (pkgState dflags) (modulePackageId md)
 
-    tallyPkgs dflags deps = partition part deps
+    tallyPkgs dflags deps | not (packageTrustOn dflags) = ([], [])
+                          | otherwise = partition part deps
         where state = pkgState dflags
               part pkg = trusted $ getPackageDetails state pkg
 
@@ -1608,8 +1658,7 @@ browseModule bang modl exports_only = do
 
         rdr_env <- GHC.getGRE
 
-        let pefas              = gopt Opt_PrintExplicitForalls dflags
-            things | bang      = catMaybes mb_things
+        let things | bang      = catMaybes mb_things
                    | otherwise = filtered_things
             pretty | bang      = pprTyThing
                    | otherwise = pprTyThingInContext
@@ -1639,7 +1688,7 @@ browseModule bang modl exports_only = do
               where (g,ng) = partition ((==m).fst) mts
 
         let prettyThings, prettyThings' :: [SDoc]
-            prettyThings = map (pretty pefas) things
+            prettyThings = map pretty things
             prettyThings' | bang      = annotate $ zip modNames prettyThings
                           | otherwise = prettyThings
         liftIO $ putStrLn $ showSDocForUser dflags unqual (vcat prettyThings')
@@ -1767,11 +1816,7 @@ checkAdd ii = do
        m <- GHC.lookupModule modname pkgqual
        when safe $ do
            t <- GHC.isModuleTrusted m
-           when (not t) $
-                throwGhcException $ CmdLineError $
-                 "can't import " ++ moduleNameString modname
-                                 ++ " as it isn't trusted."
-
+           when (not t) $ throwGhcException $ ProgramError $ ""
 
 -- -----------------------------------------------------------------------------
 -- Update the GHC API's view of the context
@@ -1886,17 +1931,18 @@ setCmd ""   = showOptions False
 setCmd "-a" = showOptions True
 setCmd str
   = case getCmd str of
-    Right ("args",   rest) ->
+    Right ("args",    rest) ->
         case toArgs rest of
             Left err -> liftIO (hPutStrLn stderr err)
             Right args -> setArgs args
-    Right ("prog",   rest) ->
+    Right ("prog",    rest) ->
         case toArgs rest of
             Right [prog] -> setProg prog
             _ -> liftIO (hPutStrLn stderr "syntax: :set prog <progname>")
-    Right ("prompt", rest) -> setPrompt $ Just $ dropWhile isSpace rest
-    Right ("editor", rest) -> setEditor $ dropWhile isSpace rest
-    Right ("stop",   rest) -> setStop   $ dropWhile isSpace rest
+    Right ("prompt",  rest) -> setPrompt  $ dropWhile isSpace rest
+    Right ("prompt2", rest) -> setPrompt2 $ dropWhile isSpace rest
+    Right ("editor",  rest) -> setEditor  $ dropWhile isSpace rest
+    Right ("stop",    rest) -> setStop    $ dropWhile isSpace rest
     _ -> case toArgs str of
          Left err -> liftIO (hPutStrLn stderr err)
          Right wds -> setOptions wds
@@ -1950,12 +1996,13 @@ showDynFlags show_all dflags = do
 
         (ghciFlags,others)  = partition (\(_, f, _) -> f `elem` flgs)
                                         DynFlags.fFlags
-        flgs = [Opt_PrintExplicitForalls
-                ,Opt_PrintBindResult
-                ,Opt_BreakOnException
-                ,Opt_BreakOnError
-                ,Opt_PrintEvldWithShow
-                ]
+        flgs = [ Opt_PrintExplicitForalls
+               , Opt_PrintExplicitKinds
+               , Opt_PrintBindResult
+               , Opt_BreakOnException
+               , Opt_BreakOnError
+               , Opt_PrintEvldWithShow
+               ]
 
 setArgs, setOptions :: [String] -> GHCi ()
 setProg, setEditor, setStop :: String -> GHCi ()
@@ -1989,22 +2036,30 @@ setStop cmd = do
   st <- getGHCiState
   setGHCiState st{ stop = cmd }
 
-setPrompt :: Maybe String -> GHCi ()
-setPrompt Nothing = do
-    st <- getGHCiState
-    setGHCiState ( st { prompt = def_prompt st } )
+setPrompt :: String -> GHCi ()
+setPrompt = setPrompt_ f err
+  where
+    f v st = st { prompt = v }
+    err st = "syntax: :set prompt <prompt>, currently \"" ++ prompt st ++ "\""
 
-setPrompt (Just value) = do
+setPrompt2 :: String -> GHCi ()
+setPrompt2 = setPrompt_ f err
+  where
+    f v st = st { prompt2 = v }
+    err st = "syntax: :set prompt2 <prompt>, currently \"" ++ prompt2 st ++ "\""
+
+setPrompt_ :: (String -> GHCiState -> GHCiState) -> (GHCiState -> String) -> String -> GHCi ()
+setPrompt_ f err value = do
   st <- getGHCiState
   if null value
-      then liftIO $ hPutStrLn stderr $ "syntax: :set prompt <prompt>, currently \"" ++ prompt st ++ "\""
+      then liftIO $ hPutStrLn stderr $ err st
       else case value of
            '\"' : _ -> case reads value of
                        [(value', xs)] | all isSpace xs ->
-                           setGHCiState (st { prompt = value' })
+                           setGHCiState $ f value' st
                        _ ->
                            liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
-           _ -> setGHCiState (st { prompt = value })
+           _ -> setGHCiState $ f value st
 
 setOptions wds =
    do -- first, deal with the GHCi opts (+s, +t, etc.)
@@ -2041,7 +2096,9 @@ newDynFlags interactive_only minus_opts = do
         -- the new packages.
         dflags2 <- getDynFlags
         when (packageFlags dflags2 /= packageFlags dflags0) $ do
-          liftIO $ hPutStrLn stderr "package flags have changed, resetting and loading new packages..."
+          when (verbosity dflags2 > 0) $
+            liftIO . putStrLn $
+              "package flags have changed, resetting and loading new packages..."
           GHC.setTargets []
           _ <- GHC.load LoadAllTargets
           liftIO $ linkPackages dflags2 new_pkgs
@@ -2066,11 +2123,12 @@ unsetOptions str
          (other_opts, rest3) = partition (`elem` map fst defaulters) rest2
 
          defaulters =
-           [ ("args"  , setArgs default_args)
-           , ("prog"  , setProg default_progname)
-           , ("prompt", setPrompt Nothing)
-           , ("editor", liftIO findEditor >>= setEditor)
-           , ("stop"  , setStop default_stop)
+           [ ("args"   , setArgs default_args)
+           , ("prog"   , setProg default_progname)
+           , ("prompt" , setPrompt default_prompt)
+           , ("prompt2", setPrompt2 default_prompt2)
+           , ("editor" , liftIO findEditor >>= setEditor)
+           , ("stop"   , setStop default_stop)
            ]
 
          no_flag ('-':'f':rest) = return ("-fno-" ++ rest)
@@ -2132,6 +2190,7 @@ showCmd str = do
         ["args"]     -> liftIO $ putStrLn (show (GhciMonad.args st))
         ["prog"]     -> liftIO $ putStrLn (show (progname st))
         ["prompt"]   -> liftIO $ putStrLn (show (prompt st))
+        ["prompt2"]  -> liftIO $ putStrLn (show (prompt2 st))
         ["editor"]   -> liftIO $ putStrLn (show (editor st))
         ["stop"]     -> liftIO $ putStrLn (show (stop st))
         ["imports"]  -> showImports
@@ -2143,11 +2202,12 @@ showCmd str = do
         ["breaks"]   -> showBkptTable
         ["context"]  -> showContext
         ["packages"]  -> showPackages
+        ["paths"]     -> showPaths
         ["languages"] -> showLanguages -- backwards compat
         ["language"]  -> showLanguages
         ["lang"]      -> showLanguages -- useful abbreviation
-        _ -> throwGhcException (CmdLineError ("syntax:  :show [ args | prog | prompt | editor | stop | modules | bindings\n"++
-                                     "               | breaks | context | packages | language ]"))
+        _ -> throwGhcException (CmdLineError ("syntax:  :show [ args | prog | prompt | prompt2 | editor | stop | modules\n" ++
+                                              "               | bindings | breaks | context | packages | language ]"))
 
 showiCmd :: String -> GHCi ()
 showiCmd str = do
@@ -2170,6 +2230,7 @@ showImports = do
 
       prel_imp
         | any isPreludeImport (rem_ctx ++ trans_ctx) = []
+        | not (xopt Opt_ImplicitPrelude dflags)      = []
         | otherwise = ["import Prelude -- implicit"]
 
       trans_comment s = s ++ " -- added automatically"
@@ -2201,13 +2262,12 @@ showBindings = do
   where
     makeDoc (AnId i) = pprTypeAndContents i
     makeDoc tt = do
-        dflags    <- getDynFlags
-        let pefas = gopt Opt_PrintExplicitForalls dflags
         mb_stuff <- GHC.getInfo False (getName tt)
-        return $ maybe (text "") (pprTT pefas) mb_stuff
-    pprTT :: PrintExplicitForalls -> (TyThing, Fixity, [GHC.ClsInst]) -> SDoc
-    pprTT pefas (thing, fixity, _insts) =
-        pprTyThing pefas thing
+        return $ maybe (text "") pprTT mb_stuff
+
+    pprTT :: (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst]) -> SDoc
+    pprTT (thing, fixity, _cls_insts, _fam_insts)
+      = pprTyThing thing
         $$ show_fixity
       where
         show_fixity
@@ -2216,9 +2276,7 @@ showBindings = do
 
 
 printTyThing :: TyThing -> GHCi ()
-printTyThing tyth = do dflags <- getDynFlags
-                       let pefas = gopt Opt_PrintExplicitForalls dflags
-                       printForUser (pprTyThing pefas tyth)
+printTyThing tyth = printForUser (pprTyThing tyth)
 
 showBkptTable :: GHCi ()
 showBkptTable = do
@@ -2247,6 +2305,19 @@ showPackages = do
         showFlag (ExposePackageId p) = text $ "  -package-id " ++ p
         showFlag (TrustPackage    p) = text $ "  -trust " ++ p
         showFlag (DistrustPackage p) = text $ "  -distrust " ++ p
+
+showPaths :: GHCi ()
+showPaths = do
+  dflags <- getDynFlags
+  liftIO $ do
+    cwd <- getCurrentDirectory
+    putStrLn $ showSDoc dflags $
+      text "current working directory: " $$
+        nest 2 (text cwd)
+    let ipaths = importPaths dflags
+    putStrLn $ showSDoc dflags $
+      text ("module import search paths:"++if null ipaths then " none" else "") $$
+        nest 2 (vcat (map text ipaths))
 
 showLanguages :: GHCi ()
 showLanguages = getDynFlags >>= liftIO . showLanguages' False
@@ -2283,7 +2354,48 @@ showLanguages' show_all dflags =
 -- -----------------------------------------------------------------------------
 -- Completion
 
-completeCmd, completeMacro, completeIdentifier, completeModule,
+completeCmd :: String -> GHCi ()
+completeCmd argLine0 = case parseLine argLine0 of
+    Just ("repl", resultRange, left) -> do
+        (unusedLine,compls) <- ghciCompleteWord (reverse left,"")
+        let compls' = takeRange resultRange compls
+        liftIO . putStrLn $ unwords [ show (length compls'), show (length compls), show (reverse unusedLine) ]
+        forM_ (takeRange resultRange compls) $ \(Completion r _ _) -> do
+            liftIO $ print r
+    _ -> throwGhcException (CmdLineError "Syntax: :complete repl [<range>] <quoted-string-to-complete>")
+  where
+    parseLine argLine
+        | null argLine = Nothing
+        | null rest1   = Nothing
+        | otherwise    = (,,) dom <$> resRange <*> s
+      where
+        (dom, rest1) = breakSpace argLine
+        (rng, rest2) = breakSpace rest1
+        resRange | head rest1 == '"' = parseRange ""
+                 | otherwise         = parseRange rng
+        s | head rest1 == '"' = readMaybe rest1 :: Maybe String
+          | otherwise         = readMaybe rest2
+        breakSpace = fmap (dropWhile isSpace) . break isSpace
+
+    takeRange (lb,ub) = maybe id (drop . pred) lb . maybe id take ub
+
+    -- syntax: [n-][m] with semantics "drop (n-1) . take m"
+    parseRange :: String -> Maybe (Maybe Int,Maybe Int)
+    parseRange s = case span isDigit s of
+                   (_, "") ->
+                       -- upper limit only
+                       Just (Nothing, bndRead s)
+                   (s1, '-' : s2)
+                    | all isDigit s2 ->
+                       Just (bndRead s1, bndRead s2)
+                   _ ->
+                       Nothing
+      where
+        bndRead x = if null x then Nothing else Just (read x)
+
+
+
+completeGhciCommand, completeMacro, completeIdentifier, completeModule,
     completeSetModule, completeSeti, completeShowiOptions,
     completeHomeModule, completeSetOptions, completeShowOptions,
     completeHomeModuleOrFile, completeExpression
@@ -2291,7 +2403,7 @@ completeCmd, completeMacro, completeIdentifier, completeModule,
 
 ghciCompleteWord :: CompletionFunc GHCi
 ghciCompleteWord line@(left,_) = case firstWord of
-    ':':cmd     | null rest     -> completeCmd line
+    ':':cmd     | null rest     -> completeGhciCommand line
                 | otherwise     -> do
                         completion <- lookupCompletion cmd
                         completion line
@@ -2306,7 +2418,7 @@ ghciCompleteWord line@(left,_) = case firstWord of
             Just (_,_,f) -> return f
             Nothing -> return completeFilename
 
-completeCmd = wrapCompleter " " $ \w -> do
+completeGhciCommand = wrapCompleter " " $ \w -> do
   macros <- liftIO $ readIORef macros_ref
   cmds   <- ghci_commands `fmap` getGHCiState
   let macro_names = map (':':) . map cmdName $ macros
@@ -2356,7 +2468,7 @@ listHomeModules w = do
 
 completeSetOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
-    where opts = "args":"prog":"prompt":"editor":"stop":flagList
+    where opts = "args":"prog":"prompt":"prompt2":"editor":"stop":flagList
           flagList = map head $ group $ sort allFlags
 
 completeSeti = wrapCompleter flagWordBreakChars $ \w -> do
@@ -2365,9 +2477,9 @@ completeSeti = wrapCompleter flagWordBreakChars $ \w -> do
 
 completeShowOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
-    where opts = ["args", "prog", "prompt", "editor", "stop",
+    where opts = ["args", "prog", "prompt", "prompt2", "editor", "stop",
                      "modules", "bindings", "linker", "breaks",
-                     "context", "packages", "language"]
+                     "context", "packages", "paths", "language", "imports"]
 
 completeShowiOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) ["language"])
@@ -2456,7 +2568,7 @@ enclosingTickSpan _ (UnhelpfulSpan _) = panic "enclosingTickSpan UnhelpfulSpan"
 enclosingTickSpan md (RealSrcSpan src) = do
   ticks <- getTickArray md
   let line = srcSpanStartLine src
-  ASSERT (inRange (bounds ticks) line) do
+  ASSERT(inRange (bounds ticks) line) do
   let toRealSrcSpan (UnhelpfulSpan _) = panic "enclosingTickSpan UnhelpfulSpan"
       toRealSrcSpan (RealSrcSpan s) = s
       enclosing_spans = [ pan | (_,pan) <- ticks ! line
@@ -2957,9 +3069,10 @@ showException se =
 -- in an exception loop (eg. let a = error a in a) the ^C exception
 -- may never be delivered.  Thanks to Marcin for pointing out the bug.
 
-ghciHandle :: ExceptionMonad m => (SomeException -> m a) -> m a -> m a
-ghciHandle h m = gmask $ \restore ->
-                 gcatch (restore m) $ \e -> restore (h e)
+ghciHandle :: (HasDynFlags m, ExceptionMonad m) => (SomeException -> m a) -> m a -> m a
+ghciHandle h m = gmask $ \restore -> do
+                 dflags <- getDynFlags
+                 gcatch (restore (GHC.prettyPrintGhcErrors dflags m)) $ \e -> restore (h e)
 
 ghciTry :: GHCi a -> GHCi (Either SomeException a)
 ghciTry (GHCi m) = GHCi $ \s -> gtry (m s)
