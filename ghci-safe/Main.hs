@@ -262,7 +262,7 @@ isSourceFile m =  isSourceFilename m
 loadNoIO :: GHCi ()
 loadNoIO = do
     addImportToContext "import GHC.GHCi"
-    addImportToContext "import Prelude hiding (putStr, putStrLn)"
+    addImportToContext "import Prelude"
     setRunMonad "NoIO"
 
 -- :runmonad
