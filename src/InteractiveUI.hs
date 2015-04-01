@@ -15,6 +15,11 @@ module InteractiveUI (
         defaultGhciSettings,
         ghciCommands,
         ghciWelcomeMsg,
+        
+        launchGHCi,
+        runGHCi,
+        defaultGHCiState,
+
         addImportToContext
     ) where
 
@@ -346,9 +351,32 @@ default_stop = ""
 default_args :: [String]
 default_args = []
 
-interactiveUI :: GhciSettings -> [(FilePath, Maybe Phase)] -> Maybe [String]
-              -> Ghc ()
-interactiveUI config srcs maybe_exprs = do
+defaultGHCiState ::  GhciSettings -> Maybe [String] -> IO GHCiState
+defaultGHCiState config exprs = do
+  default_editor <- liftIO $ findEditor
+  return $ GHCiState{ progname       = default_progname,
+                      GhciMonad.args = default_args,
+                      prompt         = defPrompt config,
+                      prompt2        = defPrompt2 config,
+                      stop           = default_stop,
+                      editor         = default_editor,
+                      options        = [],
+                      line_number    = 1,
+                      break_ctr      = 0,
+                      breaks         = [],
+                      tickarrays     = emptyModuleEnv,
+                      ghci_commands  = availableCommands config,
+                      last_command   = Nothing,
+                      cmdqueue       = [],
+                      remembered_ctx = [],
+                      transient_ctx  = [],
+                      ghc_e          = isJust exprs,
+                      short_help     = shortHelpText config,
+                      long_help      = fullHelpText config
+                    }
+
+launchGHCi :: Bool -> GHCi a -> GHCiState -> Ghc ()
+launchGHCi interactive ghci ghci_state = do
    -- although GHCi compiles with -prof, it is not usable: the byte-code
    -- compiler and interpreter don't work with profiling.  So we check for
    -- this up front and emit a helpful error message (#2197)
@@ -380,7 +408,7 @@ interactiveUI config srcs maybe_exprs = do
                $ dflags
    GHC.setInteractiveDynFlags dflags'
 
-   liftIO $ when (isNothing maybe_exprs) $ do
+   liftIO $ when interactive $ do
         -- Only for GHCi (not runghc and ghc -e):
 
         -- Turn buffering off for the compiled program's stdout/stderr
@@ -399,30 +427,14 @@ interactiveUI config srcs maybe_exprs = do
         hSetEncoding stdin utf8
 #endif
 
-   default_editor <- liftIO $ findEditor
+   _ <- startGHCi ghci ghci_state
+   return ()
 
-   startGHCi (runGHCi srcs maybe_exprs)
-        GHCiState{ progname       = default_progname,
-                   GhciMonad.args = default_args,
-                   prompt         = defPrompt config,
-                   prompt2        = defPrompt2 config,
-                   stop           = default_stop,
-                   editor         = default_editor,
-                   options        = [],
-                   line_number    = 1,
-                   break_ctr      = 0,
-                   breaks         = [],
-                   tickarrays     = emptyModuleEnv,
-                   ghci_commands  = availableCommands config,
-                   last_command   = Nothing,
-                   cmdqueue       = [],
-                   remembered_ctx = [],
-                   transient_ctx  = [],
-                   ghc_e          = isJust maybe_exprs,
-                   short_help     = shortHelpText config,
-                   long_help      = fullHelpText config
-                 }
-
+interactiveUI :: GhciSettings -> [(FilePath, Maybe Phase)] -> Maybe [String]
+              -> Ghc ()
+interactiveUI config srcs maybe_exprs = do
+   ghci_state <- liftIO $ defaultGHCiState config maybe_exprs
+   launchGHCi (isNothing maybe_exprs) (runGHCi srcs maybe_exprs) ghci_state
    return ()
 
 withGhcAppData :: (FilePath -> IO a) -> IO a -> IO a
@@ -2310,10 +2322,10 @@ showPaths :: GHCi ()
 showPaths = do
   dflags <- getDynFlags
   liftIO $ do
-    cwd <- getCurrentDirectory
+    cwdd <- getCurrentDirectory
     putStrLn $ showSDoc dflags $
       text "current working directory: " $$
-        nest 2 (text cwd)
+        nest 2 (text cwdd)
     let ipaths = importPaths dflags
     putStrLn $ showSDoc dflags $
       text ("module import search paths:"++if null ipaths then " none" else "") $$

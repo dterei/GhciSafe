@@ -10,8 +10,7 @@
 
 module Main (main) where
 
-import InteractiveUI    ( addImportToContext, interactiveUI, GhciSettings(..),
-                          defaultGhciSettings, ghciCommands, ghciWelcomeMsg )
+import InteractiveUI
 import GhciMonad        ( GHCi )
 
 import qualified GHC
@@ -76,8 +75,8 @@ main = ghciMain opts
 -- | ghciMain runs GHCi with the options specified.
 ghciMain :: GHCiOptions -> IO ()
 ghciMain opts = do
-   hSetBuffering stdout LineBuffering
-   hSetBuffering stderr LineBuffering
+   hSetBuffering stdout NoBuffering
+   hSetBuffering stderr NoBuffering
    GHC.defaultErrorHandler defaultFatalMessager defaultFlushOut (startGHCi opts)
 
 -- | startGHCi starts up GHCi.
@@ -156,7 +155,13 @@ startGHCi opts = do
    handleSourceError (\e -> do
       GHC.printException e
       liftIO $ exitWith (ExitFailure 1)) $
-         interactiveUI ghciConfig srcs Nothing
+         nteractiveUI ghciConfig srcs
+
+ghciSafe :: GhciSettings -> [(FilePath, Maybe Phase)] -> GHC.Ghc ()
+ghciSafe config srcs = do
+   ghci_state <- liftIO $ defaultGHCiState config Nothing
+   launchGHCi (isNothing maybe_exprs) (loadNoIO >> runGHCi srcs Nothing) ghci_state
+   return ()
 
 -- | GHCi startup message.
 startupMessage :: GHC.DynFlags -> IO ()
@@ -259,7 +264,7 @@ loadNoIO :: GHCi ()
 loadNoIO = do
     addImportToContext "import GHC.GHCi"
     addImportToContext "import Prelude hiding (putStr, putStrLn)"
-    setRunMonad "RIO"
+    setRunMonad "NoIO"
 
 -- :runmonad
 -- Set the monad GHCi should execute in
