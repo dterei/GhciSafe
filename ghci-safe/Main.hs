@@ -59,7 +59,7 @@ main = ghciMain opts
          maxVerbosity        = 0,
          allowFileInput      = False,
          parseTopDir         = False,
-         defaultTopDir       = Just "/usr/lib/ghc-7.8.4/",
+         defaultTopDir       = Just "/usr/local/lib/ghc-7.8.4/",
          allowedDynFlags     = Just [],
          allowedStaticFlags  = Just [],
          allowedGhciCommands = Just ["issafe", "type", "browse", "browse!", "kind", "kind!", "sprint", "print", "?", "help"],
@@ -154,13 +154,12 @@ startGHCi opts = do
 
    handleSourceError (\e -> do
       GHC.printException e
-      liftIO $ exitWith (ExitFailure 1)) $
-         nteractiveUI ghciConfig srcs
+      liftIO $ exitWith (ExitFailure 1)) $ ghciSafe ghciConfig srcs
 
 ghciSafe :: GhciSettings -> [(FilePath, Maybe Phase)] -> GHC.Ghc ()
 ghciSafe config srcs = do
    ghci_state <- liftIO $ defaultGHCiState config Nothing
-   launchGHCi (isNothing maybe_exprs) (loadNoIO >> runGHCi srcs Nothing) ghci_state
+   launchGHCi True (loadNoIO >> runGHCi srcs Nothing) ghci_state
    return ()
 
 -- | GHCi startup message.
